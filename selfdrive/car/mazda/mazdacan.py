@@ -1,9 +1,7 @@
-import copy
-
-from selfdrive.car.mazda.values import GEN1, Buttons
+from openpilot.selfdrive.car.mazda.values import Buttons, MazdaFlags
 
 
-def create_steering_control(packer, car_fingerprint, frame, apply_steer, lkas):
+def create_steering_control(packer, CP, frame, apply_steer, lkas):
 
   tmp = apply_steer + 2048
 
@@ -46,7 +44,8 @@ def create_steering_control(packer, car_fingerprint, frame, apply_steer, lkas):
 
   csum = csum % 256
 
-  if car_fingerprint in GEN1:
+  values = {}
+  if CP.flags & MazdaFlags.GEN1:
     values = {
       "LKAS_REQUEST": apply_steer,
       "CTR": ctr,
@@ -64,7 +63,17 @@ def create_steering_control(packer, car_fingerprint, frame, apply_steer, lkas):
 
 
 def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool):
-  values = copy.copy(cam_msg)
+  values = {s: cam_msg[s] for s in [
+    "LINE_VISIBLE",
+    "LINE_NOT_VISIBLE",
+    "LANE_LINES",
+    "BIT1",
+    "BIT2",
+    "BIT3",
+    "NO_ERR_BIT",
+    "S1",
+    "S1_HBEAM",
+  ]}
   values.update({
     # TODO: what's the difference between all these? do we need to send all?
     "HANDS_WARN_3_BITS": 0b111 if steer_required else 0,
@@ -79,12 +88,12 @@ def create_alert_command(packer, cam_msg: dict, ldw: bool, steer_required: bool)
   return packer.make_can_msg("CAM_LANEINFO", 0, values)
 
 
-def create_button_cmd(packer, car_fingerprint, counter, button):
+def create_button_cmd(packer, CP, counter, button):
 
   can = int(button == Buttons.CANCEL)
   res = int(button == Buttons.RESUME)
 
-  if car_fingerprint in GEN1:
+  if CP.flags & MazdaFlags.GEN1:
     values = {
       "CAN_OFF": can,
       "CAN_OFF_INV": (can + 1) % 2,

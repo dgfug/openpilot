@@ -1,47 +1,58 @@
 #include "selfdrive/modeld/runners/thneedmodel.h"
 
-#include <cassert>
+#include <string>
 
-ThneedModel::ThneedModel(const char *path, float *loutput, size_t loutput_size, int runtime) {
-  thneed = new Thneed(true);
-  thneed->record = 0;
-  thneed->load(path);
+#include "common/swaglog.h"
+
+ThneedModel::ThneedModel(const std::string path, float *_output, size_t _output_size, int runtime, bool luse_tf8, cl_context context) {
+  thneed = new Thneed(true, context);
+  thneed->load(path.c_str());
   thneed->clexec();
-  thneed->find_inputs_outputs();
 
   recorded = false;
-  output = loutput;
+  output = _output;
 }
 
-void ThneedModel::addRecurrent(float *state, int state_size) {
-  recurrent = state;
+void* ThneedModel::getCLBuffer(const std::string name) {
+  int index = -1;
+  for (int i = 0; i < inputs.size(); i++) {
+    if (name == inputs[i]->name) {
+      index = i;
+      break;
+    }
+  }
+
+  if (index == -1) {
+    LOGE("Tried to get CL buffer for input `%s` but no input with this name exists", name.c_str());
+    assert(false);
+  }
+
+  if (thneed->input_clmem.size() >= inputs.size()) {
+    return &thneed->input_clmem[inputs.size() - index - 1];
+  } else {
+    return nullptr;
+  }
 }
 
-void ThneedModel::addTrafficConvention(float *state, int state_size) {
-  trafficConvention = state;
-}
-
-void ThneedModel::addDesire(float *state, int state_size) {
-  desire = state;
-}
-
-void* ThneedModel::getInputBuf() {
-  if (thneed->input_clmem.size() > 3) return &(thneed->input_clmem[3]);
-  else return nullptr;
-}
-
-void ThneedModel::execute(float *net_input_buf, int buf_size) {
-  float *inputs[4] = {recurrent, trafficConvention, desire, net_input_buf};
+void ThneedModel::execute() {
   if (!recorded) {
-    thneed->record = THNEED_RECORD;
-    thneed->copy_inputs(inputs);
+    thneed->record = true;
+    float *input_buffers[inputs.size()];
+    for (int i = 0; i < inputs.size(); i++) {
+      input_buffers[inputs.size() - i - 1] = inputs[i]->buffer;
+    }
+
+    thneed->copy_inputs(input_buffers);
     thneed->clexec();
     thneed->copy_output(output);
     thneed->stop();
 
     recorded = true;
   } else {
-    thneed->execute(inputs, output);
+    float *input_buffers[inputs.size()];
+    for (int i = 0; i < inputs.size(); i++) {
+      input_buffers[inputs.size() - i - 1] = inputs[i]->buffer;
+    }
+    thneed->execute(input_buffers, output);
   }
 }
-

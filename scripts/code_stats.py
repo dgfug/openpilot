@@ -4,16 +4,16 @@ import ast
 import stat
 import subprocess
 
-fouts = set([x.decode('utf-8') for x in subprocess.check_output(['git', 'ls-files']).strip().split()])
+fouts = {x.decode('utf-8') for x in subprocess.check_output(['git', 'ls-files']).strip().split()}
 
 pyf = []
 for d in ["cereal", "common", "scripts", "selfdrive", "tools"]:
-  for root, dirs, files in os.walk(d):
+  for root, _, files in os.walk(d):
     for f in files:
       if f.endswith(".py"):
         pyf.append(os.path.join(root, f))
 
-imps = set()
+imps: set[str] = set()
 
 class Analyzer(ast.NodeVisitor):
   def visit_Import(self, node):
@@ -40,7 +40,7 @@ for f in sorted(pyf):
   print("%5d %s %s" % (lns, f, xbit))
   if 'test' in f:
     testlns += lns
-  elif f.startswith('tools/') or f.startswith('scripts/') or f.startswith('selfdrive/debug'):
+  elif f.startswith(('tools/', 'scripts/', 'selfdrive/debug')):
     scriptlns += lns
   elif f.startswith('selfdrive/car'):
     carlns += lns

@@ -1,5 +1,6 @@
 #include "selfdrive/ui/qt/spinner.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <iostream>
 #include <string>
@@ -10,7 +11,7 @@
 #include <QString>
 #include <QTransform>
 
-#include "selfdrive/hardware/hw.h"
+#include "system/hardware/hw.h"
 #include "selfdrive/ui/qt/qt_window.h"
 #include "selfdrive/ui/qt/util.h"
 
@@ -19,8 +20,8 @@ TrackWidget::TrackWidget(QWidget *parent) : QWidget(parent) {
   setFixedSize(spinner_size);
 
   // pre-compute all the track imgs. make this a gif instead?
-  QPixmap comma_img = QPixmap("../assets/img_spinner_comma.png").scaled(spinner_size, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-  QPixmap track_img = QPixmap("../assets/img_spinner_track.png").scaled(spinner_size, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+  QPixmap comma_img = loadPixmap("../assets/img_spinner_comma.png", spinner_size);
+  QPixmap track_img = loadPixmap("../assets/img_spinner_track.png", spinner_size);
 
   QTransform transform(1, 0, 0, 1, width() / 2, height() / 2);
   QPixmap pm(spinner_size);
@@ -93,7 +94,7 @@ Spinner::Spinner(QWidget *parent) : QWidget(parent) {
 
   notifier = new QSocketNotifier(fileno(stdin), QSocketNotifier::Read);
   QObject::connect(notifier, &QSocketNotifier::activated, this, &Spinner::update);
-};
+}
 
 void Spinner::update(int n) {
   std::string line;
@@ -111,7 +112,7 @@ void Spinner::update(int n) {
 }
 
 int main(int argc, char *argv[]) {
-  initApp();
+  initApp(argc, argv);
   QApplication a(argc, argv);
   Spinner spinner;
   setMainWindow(&spinner);

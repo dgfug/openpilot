@@ -8,8 +8,8 @@ assignees: ''
 
 **Checklist**
 
-- [ ] added to README
-- [ ] test route added to [test_routes.py](https://github.com/commaai/openpilot/blob/master/selfdrive/test/test_models.py)
+- [ ] added entry to CAR in selfdrive/car/*/values.py and ran `selfdrive/car/docs.py` to generate new docs
+- [ ] test route added to [routes.py](https://github.com/commaai/openpilot/blob/master/selfdrive/car/tests/routes.py)
 - [ ] route with openpilot:
 - [ ] route with stock system:
 - [ ] car harness used (if comma doesn't sell it, put N/A):

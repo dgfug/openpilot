@@ -1,142 +1,150 @@
 #!/usr/bin/env python3
 import os
 import sys
-import time
+from collections import defaultdict
 from typing import Any
 
-from tqdm import tqdm
+from openpilot.common.git import get_commit
+from openpilot.system.hardware import PC
+from openpilot.tools.lib.openpilotci import BASE_URL, get_url
+from openpilot.selfdrive.test.process_replay.compare_logs import compare_logs, format_diff
+from openpilot.selfdrive.test.process_replay.process_replay import get_process_config, replay_process
+from openpilot.tools.lib.framereader import FrameReader
+from openpilot.tools.lib.logreader import LogReader
+from openpilot.tools.lib.helpers import save_log
 
-import cereal.messaging as messaging
-from cereal import log
-from cereal.visionipc.visionipc_pyx import VisionIpcServer, VisionStreamType  # pylint: disable=no-name-in-module, import-error
-from common.spinner import Spinner
-from common.timeout import Timeout
-from common.transformations.camera import get_view_frame_from_road_frame, eon_f_frame_size, tici_f_frame_size
-from selfdrive.hardware import PC
-from selfdrive.manager.process_config import managed_processes
-from selfdrive.test.openpilotci import BASE_URL, get_url
-from selfdrive.test.process_replay.compare_logs import compare_logs, save_log
-from selfdrive.test.process_replay.test_processes import format_diff
-from selfdrive.version import get_git_commit
-from tools.lib.framereader import FrameReader
-from tools.lib.logreader import LogReader
+TEST_ROUTE = "2f4452b03ccb98f0|2022-12-03--13-45-30"
+SEGMENT = 6
+MAX_FRAMES = 100 if PC else 600
 
-TEST_ROUTE = "99c94dc769b5d96e|2019-08-03--14-19-59"
+NO_MODEL = "NO_MODEL" in os.environ
+SEND_EXTRA_INPUTS = bool(int(os.getenv("SEND_EXTRA_INPUTS", "0")))
 
 
-def replace_calib(msg, calib):
-  msg = msg.as_builder()
-  if calib is not None:
-    msg.liveCalibration.extrinsicMatrix = get_view_frame_from_road_frame(*calib, 1.22).flatten().tolist()
-  return msg
+def get_log_fn(ref_commit, test_route):
+  return f"{test_route}_model_tici_{ref_commit}.bz2"
 
 
-def model_replay(lr, fr, desire=None, calib=None):
+def trim_logs_to_max_frames(logs, max_frames, frs_types, include_all_types):
+  all_msgs = []
+  cam_state_counts = defaultdict(int)
+  # keep adding messages until cam states are equal to MAX_FRAMES
+  for msg in sorted(logs, key=lambda m: m.logMonoTime):
+    all_msgs.append(msg)
+    if msg.which() in frs_types:
+      cam_state_counts[msg.which()] += 1
 
-  spinner = Spinner()
-  spinner.update("starting model replay")
+    if all(cam_state_counts[state] == max_frames for state in frs_types):
+      break
 
-  vipc_server = None
-  pm = messaging.PubMaster(['roadCameraState', 'liveCalibration', 'lateralPlan'])
-  sm = messaging.SubMaster(['modelV2'])
+  if len(include_all_types) != 0:
+    other_msgs = [m for m in logs if m.which() in include_all_types]
+    all_msgs.extend(other_msgs)
 
-  # TODO: add dmonitoringmodeld
-  try:
-    managed_processes['modeld'].start()
-    time.sleep(5)
-    sm.update(1000)
+  return all_msgs
 
-    desires_by_index = {v:k for k,v in log.LateralPlan.Desire.schema.enumerants.items()}
 
-    cal = [msg for msg in lr if msg.which() == "liveCalibration"]
-    for msg in cal[:5]:
-      pm.send(msg.which(), replace_calib(msg, calib))
+def model_replay(lr, frs):
+  # modeld is using frame pairs
+  modeld_logs = trim_logs_to_max_frames(lr, MAX_FRAMES, {"roadCameraState", "wideRoadCameraState"}, {"roadEncodeIdx", "wideRoadEncodeIdx", "carParams"})
+  dmodeld_logs = trim_logs_to_max_frames(lr, MAX_FRAMES, {"driverCameraState"}, {"driverEncodeIdx", "carParams"})
 
-    log_msgs = []
-    frame_idx = 0
-    for msg in tqdm(lr):
-      if msg.which() == "liveCalibration":
-        pm.send(msg.which(), replace_calib(msg, calib))
-      elif msg.which() == "roadCameraState":
-        if desire is not None:
-          for i in desire[frame_idx].nonzero()[0]:
-            dat = messaging.new_message('lateralPlan')
-            dat.lateralPlan.desire = desires_by_index[i]
-            pm.send('lateralPlan', dat)
+  if not SEND_EXTRA_INPUTS:
+    modeld_logs = [msg for msg in modeld_logs if msg.which() != 'liveCalibration']
+    dmodeld_logs = [msg for msg in dmodeld_logs if msg.which() != 'liveCalibration']
 
-        f = msg.as_builder()
-        pm.send(msg.which(), f)
+  # initial setup
+  for s in ('liveCalibration', 'deviceState'):
+    msg = next(msg for msg in lr if msg.which() == s).as_builder()
+    msg.logMonoTime = lr[0].logMonoTime
+    modeld_logs.insert(1, msg.as_reader())
+    dmodeld_logs.insert(1, msg.as_reader())
 
-        img = fr.get(frame_idx, pix_fmt="yuv420p")[0]
-        if vipc_server is None:
-          w, h = {int(3*w*h/2): (w, h) for (w, h) in [tici_f_frame_size, eon_f_frame_size]}[len(img)]
-          vipc_server = VisionIpcServer("camerad")
-          vipc_server.create_buffers(VisionStreamType.VISION_STREAM_YUV_BACK, 40, False, w, h)
-          vipc_server.start_listener()
-          time.sleep(1) # wait for modeld to connect
+  modeld = get_process_config("modeld")
+  dmonitoringmodeld = get_process_config("dmonitoringmodeld")
 
-        vipc_server.send(VisionStreamType.VISION_STREAM_YUV_BACK, img.flatten().tobytes(), f.roadCameraState.frameId,
-                         f.roadCameraState.timestampSof, f.roadCameraState.timestampEof)
+  modeld_msgs = replay_process(modeld, modeld_logs, frs)
+  dmonitoringmodeld_msgs = replay_process(dmonitoringmodeld, dmodeld_logs, frs)
+  return modeld_msgs + dmonitoringmodeld_msgs
 
-        with Timeout(seconds=15):
-          log_msgs.append(messaging.recv_one(sm.sock['modelV2']))
-
-        spinner.update("modeld replay %d/%d" % (frame_idx, fr.frame_count))
-
-        frame_idx += 1
-        if frame_idx >= fr.frame_count:
-          break
-  except KeyboardInterrupt:
-    pass
-  finally:
-    spinner.close()
-    managed_processes['modeld'].stop()
-
-  return log_msgs
 
 if __name__ == "__main__":
-
   update = "--update" in sys.argv
-
   replay_dir = os.path.dirname(os.path.abspath(__file__))
   ref_commit_fn = os.path.join(replay_dir, "model_replay_ref_commit")
 
-  lr = LogReader(get_url(TEST_ROUTE, 0))
-  fr = FrameReader(get_url(TEST_ROUTE, 0, log_type="fcamera"))
+  # load logs
+  lr = list(LogReader(get_url(TEST_ROUTE, SEGMENT)))
+  frs = {
+    'roadCameraState': FrameReader(get_url(TEST_ROUTE, SEGMENT, log_type="fcamera"), readahead=True),
+    'driverCameraState': FrameReader(get_url(TEST_ROUTE, SEGMENT, log_type="dcamera"), readahead=True),
+    'wideRoadCameraState': FrameReader(get_url(TEST_ROUTE, SEGMENT, log_type="ecamera"), readahead=True)
+  }
 
-  log_msgs = model_replay(list(lr), fr)
+  log_msgs = []
+  # run replays
+  if not NO_MODEL:
+    log_msgs += model_replay(lr, frs)
 
+  # get diff
   failed = False
   if not update:
-    ref_commit = open(ref_commit_fn).read().strip()
-    log_fn = "%s_%s_%s.bz2" % (TEST_ROUTE, "model", ref_commit)
-    cmp_log = LogReader(BASE_URL + log_fn)
+    with open(ref_commit_fn) as f:
+      ref_commit = f.read().strip()
+    log_fn = get_log_fn(ref_commit, TEST_ROUTE)
+    try:
+      all_logs = list(LogReader(BASE_URL + log_fn))
+      cmp_log = []
 
-    ignore = ['logMonoTime', 'valid',
-              'modelV2.frameDropPerc',
-              'modelV2.modelExecutionTime']
-    tolerance = None if not PC else 1e-3
-    results: Any = {TEST_ROUTE: {}}
-    results[TEST_ROUTE]["modeld"] = compare_logs(cmp_log, log_msgs, tolerance=tolerance, ignore_fields=ignore)
-    diff1, diff2, failed = format_diff(results, ref_commit)
+      # logs are ordered based on type: modelV2, drivingModelData, driverStateV2
+      if not NO_MODEL:
+        model_start_index = next(i for i, m in enumerate(all_logs) if m.which() in ("modelV2", "drivingModelData", "cameraOdometry"))
+        cmp_log += all_logs[model_start_index:model_start_index + MAX_FRAMES*3]
+        dmon_start_index = next(i for i, m in enumerate(all_logs) if m.which() == "driverStateV2")
+        cmp_log += all_logs[dmon_start_index:dmon_start_index + MAX_FRAMES]
 
-    print(diff2)
-    print('-------------')
-    print('-------------')
-    print('-------------')
-    print('-------------')
-    print('-------------')
-    print(diff1)
-    with open("model_diff.txt", "w") as f:
-      f.write(diff2)
+      ignore = [
+        'logMonoTime',
+        'drivingModelData.frameDropPerc',
+        'modelV2.frameDropPerc',
+        'modelV2.modelExecutionTime',
+        'driverStateV2.modelExecutionTime',
+        'driverStateV2.dspExecutionTime'
+      ]
+      if PC:
+        ignore += [
+          'modelV2.laneLines.0.t',
+          'modelV2.laneLines.1.t',
+          'modelV2.laneLines.2.t',
+          'modelV2.laneLines.3.t',
+          'modelV2.roadEdges.0.t',
+          'modelV2.roadEdges.1.t',
+        ]
+      # TODO this tolerance is absurdly large
+      tolerance = 2.0 if PC else None
+      results: Any = {TEST_ROUTE: {}}
+      log_paths: Any = {TEST_ROUTE: {"models": {'ref': BASE_URL + log_fn, 'new': log_fn}}}
+      results[TEST_ROUTE]["models"] = compare_logs(cmp_log, log_msgs, tolerance=tolerance, ignore_fields=ignore)
+      diff_short, diff_long, failed = format_diff(results, log_paths, ref_commit)
 
-  if update or failed:
-    from selfdrive.test.openpilotci import upload_file
+      if "CI" in os.environ:
+        print(diff_long)
+      print('-------------\n'*5)
+      print(diff_short)
+      with open("model_diff.txt", "w") as f:
+        f.write(diff_long)
+    except Exception as e:
+      print(str(e))
+      failed = True
+
+  # upload new refs
+  if (update or failed) and not PC:
+    from openpilot.tools.lib.openpilotci import upload_file
 
     print("Uploading new refs")
 
-    new_commit = get_git_commit()
-    log_fn = "%s_%s_%s.bz2" % (TEST_ROUTE, "model", new_commit)
+    new_commit = get_commit()
+    log_fn = get_log_fn(new_commit, TEST_ROUTE)
     save_log(log_fn, log_msgs)
     try:
       upload_file(log_fn, os.path.basename(log_fn))

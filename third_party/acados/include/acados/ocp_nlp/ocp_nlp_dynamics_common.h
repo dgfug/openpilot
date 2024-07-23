@@ -1,8 +1,5 @@
 /*
- * Copyright 2019 Gianluca Frison, Dimitris Kouzoupis, Robin Verschueren,
- * Andrea Zanelli, Niels van Duijkeren, Jonathan Frey, Tommaso Sartor,
- * Branimir Novoselnik, Rien Quirynen, Rezart Qelibari, Dang Doan,
- * Jonas Koenemann, Yutao Chen, Tobias Schöls, Jonas Schlagenhauf, Moritz Diehl
+ * Copyright (c) The acados authors.
  *
  * This file is part of acados.
  *
@@ -68,7 +65,6 @@ typedef struct
     /* dims */
     acados_size_t (*dims_calculate_size)(void *config);
     void *(*dims_assign)(void *config, void *raw_memory);
-    void (*dims_initialize)(void *config, void *dims, int nx, int nu, int nx1, int nu1, int nz);
     void (*dims_set)(void *config_, void *dims_, const char *field, int *value);
     void (*dims_get)(void *config_, void *dims_, const char *field, int* value);
     /* model */
@@ -84,6 +80,7 @@ typedef struct
     /* memory */
     acados_size_t (*memory_calculate_size)(void *config, void *dims, void *opts);
     void *(*memory_assign)(void *config, void *dims, void *opts, void *raw_memory);
+    // get shooting node gap x_next(x_n, u_n) - x_{n+1}
     struct blasfeo_dvec *(*memory_get_fun_ptr)(void *memory_);
     struct blasfeo_dvec *(*memory_get_adj_ptr)(void *memory_);
     void (*memory_set_ux_ptr)(struct blasfeo_dvec *ux, void *memory_);

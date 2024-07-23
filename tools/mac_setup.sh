@@ -1,19 +1,54 @@
-#!/bin/bash -e
+#!/usr/bin/env bash
 
-OP_ROOT=$(git rev-parse --show-toplevel)
+set -e
+
+if [ -z "$SKIP_PROMPT" ]; then
+  echo "---------------   macOS support   ---------------"
+  echo "Running openpilot natively on macOS is not officially supported."
+  echo "It might build, some parts of it might work, but it's not fully tested, so there might be some issues."
+  echo
+  echo "Check out devcontainers for a seamless experience (see tools/README.md)."
+  echo "-------------------------------------------------"
+  echo -n "Are you sure you want to continue? [y/N] "
+  read -r response
+  if [[ ! "$response" =~ ^([yY][eE][sS]|[yY])+$ ]]; then
+    exit 1
+  fi
+fi
+
+DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" >/dev/null && pwd )"
+ROOT="$(cd $DIR/../ && pwd)"
+ARCH=$(uname -m)
+
+if [[ $SHELL == "/bin/zsh" ]]; then
+  RC_FILE="$HOME/.zshrc"
+elif [[ $SHELL == "/bin/bash" ]]; then
+  RC_FILE="$HOME/.bash_profile"
+fi
 
 # Install brew if required
 if [[ $(command -v brew) == "" ]]; then
-  echo "Installing Hombrew"
+  echo "Installing Homebrew"
   /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/master/install.sh)"
+  echo "[ ] installed brew t=$SECONDS"
+
+  # make brew available now
+  if [[ $ARCH == "x86_64" ]]; then
+      echo 'eval "$(/usr/local/homebrew/bin/brew shellenv)"' >> $RC_FILE
+      eval "$(/usr/local/homebrew/bin/brew shellenv)"
+  else
+      echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' >> $RC_FILE
+      eval "$(/opt/homebrew/bin/brew shellenv)"
+  fi
 fi
 
 brew bundle --file=- <<-EOS
+brew "catch2"
 brew "cmake"
+brew "cppcheck"
+brew "git-lfs"
 brew "zlib"
 brew "bzip2"
-brew "rust"
-brew "rustup-init"
 brew "capnp"
 brew "coreutils"
 brew "eigen"
@@ -23,52 +58,56 @@ brew "libarchive"
 brew "libusb"
 brew "libtool"
 brew "llvm"
-brew "openssl"
-brew "pyenv"
+brew "openssl@3.0"
 brew "qt@5"
 brew "zeromq"
 cask "gcc-arm-embedded"
+brew "portaudio"
+brew "gcc@13"
 EOS
 
-if [[ $SHELL == "/bin/zsh" ]]; then
-  RC_FILE="$HOME/.zshrc"
-elif [[ $SHELL == "/bin/bash" ]]; then
-  RC_FILE="$HOME/.bash_profile"
+echo "[ ] finished brew install t=$SECONDS"
+
+BREW_PREFIX=$(brew --prefix)
+
+# archive backend tools for pip dependencies
+export LDFLAGS="$LDFLAGS -L${BREW_PREFIX}/opt/zlib/lib"
+export LDFLAGS="$LDFLAGS -L${BREW_PREFIX}/opt/bzip2/lib"
+export CPPFLAGS="$CPPFLAGS -I${BREW_PREFIX}/opt/zlib/include"
+export CPPFLAGS="$CPPFLAGS -I${BREW_PREFIX}/opt/bzip2/include"
+
+# pycurl curl/openssl backend dependencies
+export LDFLAGS="$LDFLAGS -L${BREW_PREFIX}/opt/openssl@3/lib"
+export CPPFLAGS="$CPPFLAGS -I${BREW_PREFIX}/opt/openssl@3/include"
+export PYCURL_CURL_CONFIG=/usr/bin/curl-config
+export PYCURL_SSL_LIBRARY=openssl
+
+# install python dependencies
+$DIR/install_python_dependencies.sh
+echo "[ ] installed python dependencies t=$SECONDS"
+
+# brew does not link qt5 by default
+# check if qt5 can be linked, if not, prompt the user to link it
+QT_BIN_LOCATION="$(command -v lupdate || :)"
+if [ -n "$QT_BIN_LOCATION" ]; then
+  # if qt6 is linked, prompt the user to unlink it and link the right version
+  QT_BIN_VERSION="$(lupdate -version | awk '{print $NF}')"
+  if [[ ! "$QT_BIN_VERSION" =~ 5\.[0-9]+\.[0-9]+ ]]; then
+    echo
+    echo "lupdate/lrelease available at PATH is $QT_BIN_VERSION"
+    if [[ "$QT_BIN_LOCATION" == "$(brew --prefix)/"* ]]; then
+      echo "Run the following command to link qt5:"
+      echo "brew unlink qt@6 && brew link qt@5"
+    else
+      echo "Remove conflicting qt entries from PATH and run the following command to link qt5:"
+      echo "brew link qt@5"
+    fi
+  fi
+else
+  brew link qt@5
 fi
-
-# Build requirements for macOS
-# https://github.com/pyenv/pyenv/issues/1740
-# https://github.com/pyca/cryptography/blob/main/docs/installation.rst
-rustup-init -y
-
-export LDFLAGS="$LDFLAGS -L/usr/local/opt/zlib/lib"
-export LDFLAGS="$LDFLAGS -L/usr/local/opt/bzip2/lib"
-export LDFLAGS="$LDFLAGS -L/usr/local/opt/openssl@1.1/lib"
-export CPPFLAGS="$CPPFLAGS -I/usr/local/opt/zlib/include"
-export CPPFLAGS="$CPPFLAGS -I/usr/local/opt/bzip2/include"
-export CPPFLAGS="$CPPFLAGS -I/usr/local/opt/openssl@1.1/include"
-export PATH="$PATH:/usr/local/opt/openssl@1.1/bin"
-export PATH="$PATH:/usr/local/bin"
-
-# OpenPilot environment variables
-if [ -z "$OPENPILOT_ENV" ] && [ -n "$RC_FILE" ] && [ -z "$CI" ]; then
-  echo "export PATH=\"\$PATH:$HOME/.cargo/bin\"" >> $RC_FILE
-  echo "source $OP_ROOT/tools/openpilot_env.sh" >> $RC_FILE
-  export PATH="$PATH:\"\$HOME/.cargo/bin\""
-  source "$OP_ROOT/tools/openpilot_env.sh"
-  echo "Added openpilot_env to RC file: $RC_FILE"
-fi
-
-# install python
-PYENV_PYTHON_VERSION=$(cat $OP_ROOT/.python-version)
-pyenv install -s ${PYENV_PYTHON_VERSION}
-pyenv rehash
-eval "$(pyenv init -)"
-
-pip install pipenv==2020.8.13
-pipenv install --dev --deploy
 
 echo
-echo "----   FINISH OPENPILOT SETUP   ----"
-echo "Configure your active shell env by running:"
+echo "----   OPENPILOT SETUP DONE   ----"
+echo "Open a new shell or configure your active shell env by running:"
 echo "source $RC_FILE"

@@ -1,8 +1,5 @@
 /*
- * Copyright 2019 Gianluca Frison, Dimitris Kouzoupis, Robin Verschueren,
- * Andrea Zanelli, Niels van Duijkeren, Jonathan Frey, Tommaso Sartor,
- * Branimir Novoselnik, Rien Quirynen, Rezart Qelibari, Dang Doan,
- * Jonas Koenemann, Yutao Chen, Tobias Schöls, Jonas Schlagenhauf, Moritz Diehl
+ * Copyright (c) The acados authors.
  *
  * This file is part of acados.
  *
@@ -87,6 +84,11 @@ typedef enum {
 #else
     FULL_CONDENSING_QPOASES_NOT_AVAILABLE,
 #endif
+#ifdef ACADOS_WITH_DAQP
+    FULL_CONDENSING_DAQP,
+#else
+    FULL_CONDENSING_DAQP_NOT_AVAILABLE,
+#endif
 #ifdef ACADOS_WITH_QORE
     FULL_CONDENSING_QORE,
 #else
@@ -105,7 +107,7 @@ typedef enum {
 typedef struct
 {
     ocp_qp_solver_t qp_solver;
-} ocp_qp_solver_plan;
+} ocp_qp_solver_plan_t;
 
 
 /// Linear ocp configuration.
@@ -127,7 +129,7 @@ void ocp_qp_xcond_solver_config_initialize_from_plan(
 /// Constructs a qp solver config and Initializes with default values.
 ///
 /// \param plan The qp solver plan struct.
-ocp_qp_xcond_solver_config *ocp_qp_xcond_solver_config_create(ocp_qp_solver_plan plan);
+ocp_qp_xcond_solver_config *ocp_qp_xcond_solver_config_create(ocp_qp_solver_plan_t plan);
 
 /// Destructor for config struct, frees memory.
 ///

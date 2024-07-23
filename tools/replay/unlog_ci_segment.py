@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# pylint: skip-file
 
 import argparse
 import bisect
@@ -11,9 +10,9 @@ import tty
 from collections import defaultdict
 
 import cereal.messaging as messaging
-from tools.lib.framereader import FrameReader
-from tools.lib.logreader import LogReader
-from selfdrive.test.openpilotci import get_url
+from openpilot.tools.lib.framereader import FrameReader
+from openpilot.tools.lib.logreader import LogReader
+from openpilot.tools.lib.openpilotci import get_url
 
 IGNORE = ['initData', 'sentinel']
 
@@ -35,7 +34,7 @@ def replay(route, segment, loop):
   frame_idx = {m.roadEncodeIdx.frameId: m.roadEncodeIdx.segmentId for m in msgs if m.which() == 'roadEncodeIdx' and m.roadEncodeIdx.type == 'fullHEVC'}
 
   socks = {}
-  lag = 0
+  lag = 0.0
   i = 0
   max_i = len(msgs) - 2
 
@@ -66,7 +65,7 @@ def replay(route, segment, loop):
     lag += (next_msg.logMonoTime - msg.logMonoTime) / 1e9
     lag -= time.time() - start_time
 
-    dt = max(lag, 0)
+    dt = max(lag, 0.0)
     lag -= dt
     time.sleep(dt)
 

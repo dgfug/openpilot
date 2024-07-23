@@ -1,8 +1,5 @@
 /*
- * Copyright 2019 Gianluca Frison, Dimitris Kouzoupis, Robin Verschueren,
- * Andrea Zanelli, Niels van Duijkeren, Jonathan Frey, Tommaso Sartor,
- * Branimir Novoselnik, Rien Quirynen, Rezart Qelibari, Dang Doan,
- * Jonas Koenemann, Yutao Chen, Tobias Schöls, Jonas Schlagenhauf, Moritz Diehl
+ * Copyright (c) The acados authors.
  *
  * This file is part of acados.
  *
@@ -65,11 +62,6 @@ extern "C" {
  * options
  ************************************************/
 
-typedef struct
-{
-    int dummy;
-} ocp_nlp_reg_noreg_opts;
-
 //
 acados_size_t ocp_nlp_reg_noreg_opts_calculate_size(void);
 //
@@ -84,12 +76,6 @@ void ocp_nlp_reg_noreg_opts_set(void *config_, ocp_nlp_reg_dims *dims, void *opt
 /************************************************
  * memory
  ************************************************/
-
-typedef struct
-{
-    int dummy;
-} ocp_nlp_reg_noreg_memory;
-
 //
 acados_size_t ocp_nlp_reg_noreg_memory_calculate_size(void *config, ocp_nlp_reg_dims *dims, void *opts);
 //

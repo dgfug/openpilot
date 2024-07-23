@@ -1,46 +1,54 @@
 #pragma once
 
 #include <optional>
+#include <vector>
 
 #include <QDateTime>
-#include <QLayout>
-#include <QMouseEvent>
+#include <QFileSystemWatcher>
 #include <QPainter>
+#include <QPixmap>
 #include <QSurfaceFormat>
 #include <QWidget>
 
+#include "cereal/gen/cpp/car.capnp.h"
+#include "common/params.h"
+
+QString getVersion();
 QString getBrand();
-QString getBrandVersion();
+QString getUserAgent();
 std::optional<QString> getDongleId();
-void configFont(QPainter &p, const QString &family, int size, const QString &style);
-void clearLayout(QLayout* layout);
+QMap<QString, QString> getSupportedLanguages();
 void setQtSurfaceFormat();
+void sigTermHandler(int s);
 QString timeAgo(const QDateTime &date);
 void swagLogMessageHandler(QtMsgType type, const QMessageLogContext &context, const QString &msg);
-void initApp();
-QWidget* topWidget (QWidget* widget);
+void initApp(int argc, char *argv[], bool disable_hidpi = true);
+QWidget* topWidget(QWidget* widget);
+QPixmap loadPixmap(const QString &fileName, const QSize &size = {}, Qt::AspectRatioMode aspectRatioMode = Qt::KeepAspectRatio);
+QPixmap bootstrapPixmap(const QString &id);
+bool hasLongitudinalControl(const cereal::CarParams::Reader &car_params);
 
-
-// convenience class for wrapping layouts
-class LayoutWidget : public QWidget {
-  Q_OBJECT
-
-public:
-  LayoutWidget(QLayout *l, QWidget *parent = nullptr) : QWidget(parent) {
-    setLayout(l);
-  };
+struct InterFont : public QFont {
+  InterFont(int pixel_size, QFont::Weight weight = QFont::Normal) : QFont("Inter") {
+    setPixelSize(pixel_size);
+    setWeight(weight);
+  }
 };
 
-class ClickableWidget : public QWidget {
+class ParamWatcher : public QObject {
   Q_OBJECT
 
 public:
-  ClickableWidget(QWidget *parent = nullptr);
-
-protected:
-  void mouseReleaseEvent(QMouseEvent *event) override;
-  void paintEvent(QPaintEvent *) override;
+  ParamWatcher(QObject *parent);
+  void addParam(const QString &param_name);
 
 signals:
-  void clicked();
+  void paramChanged(const QString &param_name, const QString &param_value);
+
+private:
+  void fileChanged(const QString &path);
+
+  QFileSystemWatcher *watcher;
+  QHash<QString, QString> params_hash;
+  Params params;
 };

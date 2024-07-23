@@ -1,193 +1,160 @@
 #!/usr/bin/env python3
 import os
-import time
-import multiprocessing
-from tqdm import tqdm
 import argparse
-# run DM procs
-os.environ["USE_WEBCAM"] = "1"
+import time
+import capnp
+import numpy as np
 
-import cereal.messaging as messaging
-from cereal.services import service_list
-from cereal.visionipc.visionipc_pyx import VisionIpcServer, VisionStreamType  # pylint: disable=no-name-in-module, import-error
-from common.params import Params
-from common.realtime import Ratekeeper, DT_MDL, DT_DMON
-from common.transformations.camera import eon_f_frame_size, eon_d_frame_size
-from selfdrive.car.fingerprints import FW_VERSIONS
-from selfdrive.manager.process import ensure_running
-from selfdrive.manager.process_config import managed_processes
-from selfdrive.test.update_ci_routes import upload_route
-from tools.lib.route import Route
-from tools.lib.framereader import FrameReader
-from tools.lib.logreader import LogReader
+from typing import Any
+from collections.abc import Iterable
 
-
-process_replay_dir = os.path.dirname(os.path.abspath(__file__))
-FAKEDATA = os.path.join(process_replay_dir, "fakedata/")
+from openpilot.selfdrive.test.process_replay.process_replay import CONFIGS, FAKEDATA, ProcessConfig, replay_process, get_process_config, \
+                                                                   check_openpilot_enabled, check_most_messages_valid, get_custom_params_from_lr
+from openpilot.selfdrive.test.process_replay.vision_meta import DRIVER_CAMERA_FRAME_SIZES
+from openpilot.selfdrive.test.update_ci_routes import upload_route
+from openpilot.tools.lib.route import Route
+from openpilot.tools.lib.framereader import FrameReader, BaseFrameReader, FrameType
+from openpilot.tools.lib.logreader import LogReader, LogIterable
+from openpilot.tools.lib.helpers import save_log
 
 
-def replay_service(s, msgs):
-  pm = messaging.PubMaster([s, ])
-  rk = Ratekeeper(service_list[s].frequency, print_delay_threshold=None)
-  smsgs = [m for m in msgs if m.which() == s]
-  while True:
-    for m in smsgs:
-      # TODO: use logMonoTime
-      pm.send(s, m.as_builder())
-      rk.keep_time()
+class DummyFrameReader(BaseFrameReader):
+  def __init__(self, w: int, h: int, frame_count: int, pix_val: int):
+    self.pix_val = pix_val
+    self.w, self.h = w, h
+    self.frame_count = frame_count
+    self.frame_type = FrameType.raw
 
-vs = None
-def replay_cameras(lr, frs):
-  cameras = [
-    ("roadCameraState", DT_MDL, eon_f_frame_size, VisionStreamType.VISION_STREAM_YUV_BACK),
-    ("driverCameraState", DT_DMON, eon_d_frame_size, VisionStreamType.VISION_STREAM_YUV_FRONT),
-  ]
+  def get(self, idx, count=1, pix_fmt="yuv420p"):
+    if pix_fmt == "rgb24":
+      shape = (self.h, self.w, 3)
+    elif pix_fmt == "nv12" or pix_fmt == "yuv420p":
+      shape = (int((self.h * self.w) * 3 / 2),)
+    else:
+      raise NotImplementedError
 
-  def replay_camera(s, stream, dt, vipc_server, fr, size):
-    pm = messaging.PubMaster([s, ])
-    rk = Ratekeeper(1 / dt, print_delay_threshold=None)
+    return [np.full(shape, self.pix_val, dtype=np.uint8) for _ in range(count)]
 
-    img = b"\x00" * int(size[0]*size[1]*3/2)
-    while True:
-      if fr is not None:
-        img = fr.get(rk.frame % fr.frame_count, pix_fmt='yuv420p')[0]
-        img = img.flatten().tobytes()
-
-      rk.keep_time()
-
-      m = messaging.new_message(s)
-      msg = getattr(m, s)
-      msg.frameId = rk.frame
-      pm.send(s, m)
-
-      vipc_server.send(stream, img, msg.frameId, msg.timestampSof, msg.timestampEof)
-
-  # init vipc server and cameras
-  p = []
-  global vs
-  vs = VisionIpcServer("camerad")
-  for (s, dt, size, stream) in cameras:
-    fr = frs.get(s, None)
-    vs.create_buffers(stream, 40, False, size[0], size[1])
-    p.append(multiprocessing.Process(target=replay_camera,
-                                     args=(s, stream, dt, vs, fr, size)))
-
-  # hack to make UI work
-  vs.create_buffers(VisionStreamType.VISION_STREAM_RGB_BACK, 4, True, eon_f_frame_size[0], eon_f_frame_size[1])
-  vs.start_listener()
-  return p
+  @staticmethod
+  def zero_dcamera():
+    return DummyFrameReader(*DRIVER_CAMERA_FRAME_SIZES[("tici", "ar0231")], 1200, 0)
 
 
-def regen_segment(lr, frs=None, outdir=FAKEDATA):
+def regen_segment(
+  lr: LogIterable, frs: dict[str, Any] = None,
+  processes: Iterable[ProcessConfig] = CONFIGS, disable_tqdm: bool = False
+) -> list[capnp._DynamicStructReader]:
+  all_msgs = sorted(lr, key=lambda m: m.logMonoTime)
+  custom_params = get_custom_params_from_lr(all_msgs)
 
-  lr = list(lr)
-  if frs is None:
-    frs = dict()
+  print("Replayed processes:", [p.proc_name for p in processes])
+  print("\n\n", "*"*30, "\n\n", sep="")
 
-  # setup env
-  params = Params()
-  params.clear_all()
-  params.put_bool("Passive", False)
-  params.put_bool("OpenpilotEnabledToggle", True)
-  params.put_bool("CommunityFeaturesToggle", True)
-  params.put_bool("CommunityFeaturesToggle", True)
-  cal = messaging.new_message('liveCalibration')
-  cal.liveCalibration.validBlocks = 20
-  cal.liveCalibration.rpyCalib = [0.0, 0.0, 0.0]
-  params.put("CalibrationParams", cal.to_bytes())
+  output_logs = replay_process(processes, all_msgs, frs, return_all_logs=True, custom_params=custom_params, disable_progress=disable_tqdm)
 
-  os.environ["LOG_ROOT"] = outdir
-  os.environ["SIMULATION"] = "1"
-
-  os.environ['SKIP_FW_QUERY'] = ""
-  os.environ['FINGERPRINT'] = ""
-  for msg in lr:
-    if msg.which() == 'carParams':
-      car_fingerprint = msg.carParams.carFingerprint
-      if len(msg.carParams.carFw) and (car_fingerprint in FW_VERSIONS):
-        params.put("CarParamsCache", msg.carParams.as_builder().to_bytes())
-      else:
-        os.environ['SKIP_FW_QUERY'] = "1"
-        os.environ['FINGERPRINT'] = car_fingerprint
-
-  #TODO: init car, make sure starts engaged when segment is engaged
-
-  fake_daemons = {
-    'sensord': [
-      multiprocessing.Process(target=replay_service, args=('sensorEvents', lr)),
-    ],
-    'pandad': [
-      multiprocessing.Process(target=replay_service, args=('can', lr)),
-      multiprocessing.Process(target=replay_service, args=('pandaStates', lr)),
-    ],
-    #'managerState': [
-    #  multiprocessing.Process(target=replay_service, args=('managerState', lr)),
-    #],
-    'thermald': [
-      multiprocessing.Process(target=replay_service, args=('deviceState', lr)),
-    ],
-    'camerad': [
-      *replay_cameras(lr, frs),
-    ],
-
-    # TODO: fix these and run them
-    'paramsd': [
-      multiprocessing.Process(target=replay_service, args=('liveParameters', lr)),
-    ],
-    'locationd': [
-      multiprocessing.Process(target=replay_service, args=('liveLocationKalman', lr)),
-    ],
-  }
-
-  try:
-    # start procs up
-    ignore = list(fake_daemons.keys()) + ['ui', 'manage_athenad', 'uploader']
-    ensure_running(managed_processes.values(), started=True, not_run=ignore)
-    for procs in fake_daemons.values():
-      for p in procs:
-        p.start()
-
-    for _ in tqdm(range(60)):
-      # ensure all procs are running
-      for d, procs in fake_daemons.items():
-        for p in procs:
-          if not p.is_alive():
-            raise Exception(f"{d}'s {p.name} died")
-      time.sleep(1)
-  finally:
-    # kill everything
-    for p in managed_processes.values():
-      p.stop()
-    for procs in fake_daemons.values():
-      for p in procs:
-        p.terminate()
-
-  r = params.get("CurrentRoute", encoding='utf-8')
-  return os.path.join(outdir, r + "--0")
+  return output_logs
 
 
-def regen_and_save(route, sidx, upload=False, use_route_meta=True):
+def setup_data_readers(
+    route: str, sidx: int, use_route_meta: bool,
+    needs_driver_cam: bool = True, needs_road_cam: bool = True, dummy_driver_cam: bool = False
+) -> tuple[LogReader, dict[str, Any]]:
   if use_route_meta:
-    r = Route(args.route)
-    lr = LogReader(r.log_paths()[args.seg])
-    fr = FrameReader(r.camera_paths()[args.seg])
+    r = Route(route)
+    lr = LogReader(r.log_paths()[sidx])
+    frs = {}
+    if needs_road_cam and len(r.camera_paths()) > sidx and r.camera_paths()[sidx] is not None:
+      frs['roadCameraState'] = FrameReader(r.camera_paths()[sidx])
+    if needs_road_cam and  len(r.ecamera_paths()) > sidx and r.ecamera_paths()[sidx] is not None:
+      frs['wideRoadCameraState'] = FrameReader(r.ecamera_paths()[sidx])
+    if needs_driver_cam:
+      if dummy_driver_cam:
+        frs['driverCameraState'] = DummyFrameReader.zero_dcamera()
+      elif len(r.dcamera_paths()) > sidx and r.dcamera_paths()[sidx] is not None:
+        device_type = next(str(msg.initData.deviceType) for msg in lr if msg.which() == "initData")
+        assert device_type != "neo", "Driver camera not supported on neo segments. Use dummy dcamera."
+        frs['driverCameraState'] = FrameReader(r.dcamera_paths()[sidx])
   else:
     lr = LogReader(f"cd:/{route.replace('|', '/')}/{sidx}/rlog.bz2")
-    fr = FrameReader(f"cd:/{route.replace('|', '/')}/{sidx}/fcamera.hevc")
-  rpath = regen_segment(lr, {'roadCameraState': fr})
-  relr = os.path.relpath(rpath)
+    frs = {}
+    if needs_road_cam:
+      frs['roadCameraState'] = FrameReader(f"cd:/{route.replace('|', '/')}/{sidx}/fcamera.hevc")
+      if next((True for m in lr if m.which() == "wideRoadCameraState"), False):
+        frs['wideRoadCameraState'] = FrameReader(f"cd:/{route.replace('|', '/')}/{sidx}/ecamera.hevc")
+    if needs_driver_cam:
+      if dummy_driver_cam:
+        frs['driverCameraState'] = DummyFrameReader.zero_dcamera()
+      else:
+        device_type = next(str(msg.initData.deviceType) for msg in lr if msg.which() == "initData")
+        assert device_type != "neo", "Driver camera not supported on neo segments. Use dummy dcamera."
+        frs['driverCameraState'] = FrameReader(f"cd:/{route.replace('|', '/')}/{sidx}/dcamera.hevc")
 
-  print("\n\n", "*"*30, "\n\n")
-  print("New route:", relr, "\n")
+  return lr, frs
+
+
+def regen_and_save(
+  route: str, sidx: int, processes: str | Iterable[str] = "all", outdir: str = FAKEDATA,
+  upload: bool = False, use_route_meta: bool = False, disable_tqdm: bool = False, dummy_driver_cam: bool = False
+) -> str:
+  if not isinstance(processes, str) and not hasattr(processes, "__iter__"):
+    raise ValueError("whitelist_proc must be a string or iterable")
+
+  if processes != "all":
+    if isinstance(processes, str):
+      raise ValueError(f"Invalid value for processes: {processes}")
+
+    replayed_processes = []
+    for d in processes:
+      cfg = get_process_config(d)
+      replayed_processes.append(cfg)
+  else:
+    replayed_processes = CONFIGS
+
+  all_vision_pubs = {pub for cfg in replayed_processes for pub in cfg.vision_pubs}
+  lr, frs = setup_data_readers(route, sidx, use_route_meta,
+                               needs_driver_cam="driverCameraState" in all_vision_pubs,
+                               needs_road_cam="roadCameraState" in all_vision_pubs or "wideRoadCameraState" in all_vision_pubs,
+                               dummy_driver_cam=dummy_driver_cam)
+  output_logs = regen_segment(lr, frs, replayed_processes, disable_tqdm=disable_tqdm)
+
+  log_dir = os.path.join(outdir, time.strftime("%Y-%m-%d--%H-%M-%S--0", time.gmtime()))
+  rel_log_dir = os.path.relpath(log_dir)
+  rpath = os.path.join(log_dir, "rlog.bz2")
+
+  os.makedirs(log_dir)
+  save_log(rpath, output_logs, compress=True)
+
+  print("\n\n", "*"*30, "\n\n", sep="")
+  print("New route:", rel_log_dir, "\n")
+
+  if not check_openpilot_enabled(output_logs):
+    raise Exception("Route did not engage for long enough")
+  if not check_most_messages_valid(output_logs):
+    raise Exception("Route has too many invalid messages")
+
   if upload:
-    upload_route(relr)
-  return relr
+    upload_route(rel_log_dir)
+
+  return rel_log_dir
 
 
 if __name__ == "__main__":
+  def comma_separated_list(string):
+    return string.split(",")
+
+  all_procs = [p.proc_name for p in CONFIGS]
   parser = argparse.ArgumentParser(description="Generate new segments from old ones")
   parser.add_argument("--upload", action="store_true", help="Upload the new segment to the CI bucket")
+  parser.add_argument("--outdir", help="log output dir", default=FAKEDATA)
+  parser.add_argument("--dummy-dcamera", action='store_true', help="Use dummy blank driver camera")
+  parser.add_argument("--whitelist-procs", type=comma_separated_list, default=all_procs,
+                      help="Comma-separated whitelist of processes to regen (e.g. controlsd,radard)")
+  parser.add_argument("--blacklist-procs", type=comma_separated_list, default=[],
+                      help="Comma-separated blacklist of processes to regen (e.g. controlsd,radard)")
   parser.add_argument("route", type=str, help="The source route")
   parser.add_argument("seg", type=int, help="Segment in source route")
   args = parser.parse_args()
-  regen_and_save(args.route, args.seg, args.upload)
+
+  blacklist_set = set(args.blacklist_procs)
+  processes = [p for p in args.whitelist_procs if p not in blacklist_set]
+  regen_and_save(args.route, args.seg, processes=processes, upload=args.upload, outdir=args.outdir, dummy_driver_cam=args.dummy_dcamera)
